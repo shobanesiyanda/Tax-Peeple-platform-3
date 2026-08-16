@@ -1,4 +1,4 @@
-name: Trailaris History Window Probe
+name: Trailaris Global Route Probe
 on:
   push:
     branches: [trailaris-scratch]
@@ -7,56 +7,108 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Probe 29 Exness Standard routes across candidate months
+      - name: Resolve Exness non-crypto and GER40 history
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
-          import urllib.request, json, calendar
-          from concurrent.futures import ThreadPoolExecutor, as_completed
-          routes={
-            'EURUSD':'EURUSDm','GBPUSD':'GBPUSDm','USDJPY':'USDJPYm','AUDUSD':'AUDUSDm','USDCAD':'USDCADm','USDCHF':'USDCHFm','NZDUSD':'NZDUSDm',
-            'EURJPY':'EURJPYm','GBPJPY':'GBPJPYm','EURGBP':'EURGBPm','AUDJPY':'AUDJPYm','CADJPY':'CADJPYm','GBPCHF':'GBPCHFm',
-            'XAUUSD':'XAUUSDm','XAGUSD':'XAGUSDm','BTCUSD':'BTCUSDm','ETHUSD':'ETHUSDm','SOLUSD':'SOLUSDm','BNBUSD':'BNBUSDm','XRPUSD':'XRPUSDm',
-            'US100':'USTECm','US500':'US500m','US30':'US30m','GER40':'DE40m','UK100':'UK100m','JP225':'JP225m','WTI':'USOILm','BRENT':'UKOILm','NATGAS':'XNGUSDm'}
-          months=[]
-          y,m=2024,1
+          import urllib.request,json
+          from concurrent.futures import ThreadPoolExecutor,as_completed
+          base={
+            'EURUSD':['EURUSDm'],'GBPUSD':['GBPUSDm'],'USDJPY':['USDJPYm'],'AUDUSD':['AUDUSDm'],'USDCAD':['USDCADm'],'USDCHF':['USDCHFm'],'NZDUSD':['NZDUSDm'],
+            'EURJPY':['EURJPYm'],'GBPJPY':['GBPJPYm'],'EURGBP':['EURGBPm'],'AUDJPY':['AUDJPYm'],'CADJPY':['CADJPYm'],'GBPCHF':['GBPCHFm'],
+            'XAUUSD':['XAUUSDm'],'XAGUSD':['XAGUSDm'],
+            'US100':['USTECm'],'US500':['US500m'],'US30':['US30m'],'GER40':['DE30m','DE40m','GER40m'],'UK100':['UK100m'],'JP225':['JP225m'],
+            'WTI':['USOILm'],'BRENT':['UKOILm'],'NATGAS':['XNGUSDm']}
+          months=[];y,m=2024,1
           while (y,m)<=(2026,7):
-              months.append((y,m));m+=1
-              if m==13:y+=1;m=1
-          def probe(job):
-              route,sym,y,m=job
-              u=f'https://ticks.ex2archive.com/ticks/{sym}/{y}/{m:02d}/Exness_{sym}_{y}_{m:02d}.zip'
-              try:
-                  req=urllib.request.Request(u,method='HEAD',headers={'User-Agent':'Mozilla/5.0'})
-                  with urllib.request.urlopen(req,timeout=20) as r:
-                      return route,y,m,(r.status==200),int(r.headers.get('Content-Length') or 0)
-              except Exception:
-                  return route,y,m,False,0
-          jobs=[(r,s,y,m) for r,s in routes.items() for y,m in months]
-          availability={r:{} for r in routes}; sizes={r:{} for r in routes}
+            months.append((y,m));m+=1
+            if m==13:y+=1;m=1
+          def p(job):
+            r,s,y,m=job;u=f'https://ticks.ex2archive.com/ticks/{s}/{y}/{m:02d}/Exness_{s}_{y}_{m:02d}.zip'
+            try:
+              q=urllib.request.Request(u,method='HEAD',headers={'User-Agent':'Mozilla/5.0'})
+              with urllib.request.urlopen(q,timeout=15) as z:return r,s,y,m,z.status==200,int(z.headers.get('Content-Length') or 0)
+            except:return r,s,y,m,False,0
+          jobs=[(r,s,y,m) for r,ss in base.items() for s in ss for y,m in months]
+          hit={r:{s:{} for s in ss} for r,ss in base.items()}
           with ThreadPoolExecutor(max_workers=48) as ex:
-              for route,y,m,ok,n in [f.result() for f in as_completed([ex.submit(probe,j) for j in jobs])]:
-                  key=f'{y}-{m:02d}';availability[route][key]=ok;sizes[route][key]=n
+            for r,s,y,m,ok,n in [f.result() for f in as_completed([ex.submit(p,j) for j in jobs])]:hit[r][s][f'{y}-{m:02d}']=(ok,n)
+          selected={}
+          for r,ss in base.items():
+            ranked=[]
+            for s in ss:
+              seq=[k for k,(ok,n) in hit[r][s].items() if ok]
+              ranked.append((len(seq),min(seq) if seq else '9999-99',s))
+            ranked.sort(key=lambda x:(-x[0],x[1],x[2]));selected[r]=ranked[0][2]
           keys=[f'{y}-{m:02d}' for y,m in months]
-          common=[k for k in keys if all(availability[r].get(k,False) for r in routes)]
-          latest='2026-07'
-          # longest contiguous common suffix ending in latest completed month
+          common=[k for k in keys if all(hit[r][selected[r]].get(k,(False,0))[0] for r in base)]
           suffix=[]
           for k in reversed(keys):
-              if k>latest: continue
-              if all(availability[r].get(k,False) for r in routes): suffix.append(k)
-              else:
-                  if suffix: break
+            if all(hit[r][selected[r]].get(k,(False,0))[0] for r in base):suffix.append(k)
+            elif suffix:break
           suffix=list(reversed(suffix))
-          first_by_route={r:next((k for k in keys if availability[r].get(k,False)),None) for r in routes}
-          missing_by_month={k:[r for r in routes if not availability[r].get(k,False)] for k in keys}
-          print('COMMON_SUFFIX='+json.dumps({'start':suffix[0] if suffix else None,'end':suffix[-1] if suffix else None,'months':len(suffix)},sort_keys=True))
-          print('FIRST_BY_ROUTE='+json.dumps(first_by_route,sort_keys=True))
-          print('COMMON_MONTHS='+json.dumps(common))
-          # compact diagnostics only for 2025 onward
-          print('MISSING_2025_PLUS='+json.dumps({k:v for k,v in missing_by_month.items() if k>='2025-01' and v},sort_keys=True))
+          print('EXNESS_SELECTED='+json.dumps(selected,sort_keys=True))
+          print('EXNESS_24_SUFFIX='+json.dumps({'start':suffix[0] if suffix else None,'end':suffix[-1] if suffix else None,'months':len(suffix)},sort_keys=True))
+          print('GER_VARIANTS='+json.dumps({s:{k:v for k,v in d.items() if v[0]} for s,d in hit['GER40'].items()},sort_keys=True))
+          PY
+      - name: Probe Binance Futures crypto history and exchange specs
+        shell: bash
+        run: |
+          python - <<'PY'
+          import urllib.request,json
+          syms=['BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','XRPUSDT']
+          months=[];y,m=2024,1
+          while (y,m)<=(2026,7):
+            months.append((y,m));m+=1
+            if m==13:y+=1;m=1
+          out={}
+          for s in syms:
+            seq=[]
+            for y,m in months:
+              u=f'https://data.binance.vision/data/futures/um/monthly/klines/{s}/1m/{s}-1m-{y}-{m:02d}.zip'
+              try:
+                q=urllib.request.Request(u,method='HEAD',headers={'User-Agent':'Mozilla/5.0'})
+                with urllib.request.urlopen(q,timeout=15) as r:
+                  if r.status==200:seq.append(f'{y}-{m:02d}')
+              except:pass
+            out[s]={'first':min(seq) if seq else None,'last':max(seq) if seq else None,'months':len(seq)}
+          try:
+            with urllib.request.urlopen('https://fapi.binance.com/fapi/v1/exchangeInfo',timeout=20) as r:data=json.load(r)
+            specs={x['symbol']:{'status':x['status'],'contractType':x['contractType'],'pricePrecision':x['pricePrecision'],'quantityPrecision':x['quantityPrecision'],'filters':x['filters']} for x in data['symbols'] if x['symbol'] in syms}
+          except Exception as e:specs={'error':repr(e)}
+          print('BINANCE_HISTORY='+json.dumps(out,sort_keys=True))
+          print('BINANCE_SPECS='+json.dumps(specs,sort_keys=True))
+          PY
+      - name: Probe Deriv synthetic historical depth
+        shell: bash
+        run: |
+          python -m pip install --quiet websocket-client
+          python - <<'PY'
+          import websocket,json,datetime,time
+          syms=['R_75','R_50','R_100','R_25','R_10']; out={}
+          start=int(datetime.datetime(2024,1,2,tzinfo=datetime.timezone.utc).timestamp())
+          for s in syms:
+            try:
+              ws=websocket.create_connection('wss://ws.binaryws.com/websockets/v3?app_id=1089',timeout=30)
+              ws.send(json.dumps({'ticks_history':s,'start':start,'end':start+7200,'style':'candles','granularity':60,'adjust_start_time':1,'count':120}))
+              m=json.loads(ws.recv());ws.close();cs=m.get('candles',[])
+              out[s]={'candles':len(cs),'first_epoch':cs[0].get('epoch') if cs else None,'last_epoch':cs[-1].get('epoch') if cs else None,'error':m.get('error')}
+            except Exception as e:out[s]={'error':repr(e)}
+          print('DERIV_DEPTH='+json.dumps(out,sort_keys=True))
+          PY
+      - name: Inspect Exness archive schema
+        shell: bash
+        run: |
+          python - <<'PY'
+          import urllib.request,zipfile,io
+          u='https://ticks.ex2archive.com/ticks/EURUSDm/2025/05/Exness_EURUSDm_2025_05.zip'
+          b=urllib.request.urlopen(urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0'}),timeout=60).read()
+          z=zipfile.ZipFile(io.BytesIO(b));print('EXNESS_ZIP_BYTES=',len(b));print('EXNESS_FILES=',z.namelist()[:5])
+          for n in z.namelist()[:1]:
+            with z.open(n) as f:
+              for i in range(5): print('EXNESS_SAMPLE='+f.readline().decode('utf-8','replace').strip())
           PY
