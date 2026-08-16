@@ -10,32 +10,62 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Probe official data lanes
+      - name: Probe Exness route mappings
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
-          import urllib.request, json, ssl
-          urls={
-            'binance':'https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/1m/BTCUSDT-1m-2026-05.zip',
-            'exness_raw':'https://ticks.ex2archive.com/ticks/EURUSD_Raw_Spread/2026/05/Exness_EURUSD_Raw_Spread_2026_05.zip',
+          import urllib.request, json
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          routes={
+            'EURUSD':['EURUSDm','EURUSD_Raw_Spread','EURUSD'],
+            'GBPUSD':['GBPUSDm','GBPUSD_Raw_Spread','GBPUSD'],
+            'USDJPY':['USDJPYm','USDJPY_Raw_Spread','USDJPY'],
+            'AUDUSD':['AUDUSDm','AUDUSD_Raw_Spread','AUDUSD'],
+            'USDCAD':['USDCADm','USDCAD_Raw_Spread','USDCAD'],
+            'USDCHF':['USDCHFm','USDCHF_Raw_Spread','USDCHF'],
+            'NZDUSD':['NZDUSDm','NZDUSD_Raw_Spread','NZDUSD'],
+            'EURJPY':['EURJPYm','EURJPY_Raw_Spread','EURJPY'],
+            'GBPJPY':['GBPJPYm','GBPJPY_Raw_Spread','GBPJPY'],
+            'EURGBP':['EURGBPm','EURGBP_Raw_Spread','EURGBP'],
+            'AUDJPY':['AUDJPYm','AUDJPY_Raw_Spread','AUDJPY'],
+            'CADJPY':['CADJPYm','CADJPY_Raw_Spread','CADJPY'],
+            'GBPCHF':['GBPCHFm','GBPCHF_Raw_Spread','GBPCHF'],
+            'XAUUSD':['XAUUSDm','XAUUSD_Raw_Spread','XAUUSD'],
+            'XAGUSD':['XAGUSDm','XAGUSD_Raw_Spread','XAGUSD'],
+            'BTCUSD':['BTCUSDm','BTCUSD_Raw_Spread','BTCUSD'],
+            'ETHUSD':['ETHUSDm','ETHUSD_Raw_Spread','ETHUSD'],
+            'SOLUSD':['SOLUSDm','SOLUSD_Raw_Spread','SOLUSD'],
+            'BNBUSD':['BNBUSDm','BNBUSD_Raw_Spread','BNBUSD'],
+            'XRPUSD':['XRPUSDm','XRPUSD_Raw_Spread','XRPUSD'],
+            'US100':['USTECm','USTEC_Raw_Spread','USTEC','US100m','US100_Raw_Spread','US100'],
+            'US500':['US500m','US500_Raw_Spread','US500'],
+            'US30':['US30m','US30_Raw_Spread','US30'],
+            'GER40':['DE40m','DE40_Raw_Spread','DE40','DE30m','DE30_Raw_Spread','DE30','GER40m','GER40_Raw_Spread','GER40'],
+            'UK100':['UK100m','UK100_Raw_Spread','UK100'],
+            'JP225':['JP225m','JP225_Raw_Spread','JP225'],
+            'WTI':['USOILm','USOIL_Raw_Spread','USOIL','WTIm','WTI_Raw_Spread','WTI'],
+            'BRENT':['UKOILm','UKOIL_Raw_Spread','UKOIL','BRENTm','BRENT_Raw_Spread','BRENT'],
+            'NATGAS':['XNGUSDm','XNGUSD_Raw_Spread','XNGUSD','NATGASm','NATGAS_Raw_Spread','NATGAS']
           }
-          out={}
-          for k,u in urls.items():
+          def probe(item):
+              route,sym=item
+              u=f'https://ticks.ex2archive.com/ticks/{sym}/2026/05/Exness_{sym}_2026_05.zip'
               try:
                   req=urllib.request.Request(u,method='HEAD',headers={'User-Agent':'Mozilla/5.0'})
-                  with urllib.request.urlopen(req,timeout=30) as r:
-                      out[k]={'status':r.status,'length':r.headers.get('Content-Length'),'type':r.headers.get('Content-Type'),'final':r.geturl()}
-              except Exception as e:
-                  out[k]={'error':repr(e)}
-          print('HTTP_PROOF='+json.dumps(out,sort_keys=True))
-          PY
-          python -m pip install --quiet websocket-client
-          python - <<'PY'
-          import websocket, json
-          url='wss://ws.binaryws.com/websockets/v3?app_id=1089'
-          ws=websocket.create_connection(url,timeout=30)
-          ws.send(json.dumps({'ticks_history':'R_75','end':'latest','count':10,'style':'candles','granularity':60,'adjust_start_time':1}))
-          msg=json.loads(ws.recv()); ws.close()
-          print('DERIV_PROOF='+json.dumps({'msg_type':msg.get('msg_type'),'candles':len(msg.get('candles',[])),'error':msg.get('error')},sort_keys=True))
+                  with urllib.request.urlopen(req,timeout=15) as r:
+                      return route,sym,r.status,int(r.headers.get('Content-Length') or 0)
+              except Exception:
+                  return route,sym,0,0
+          jobs=[(r,s) for r,syms in routes.items() for s in syms]
+          hits={r:[] for r in routes}
+          with ThreadPoolExecutor(max_workers=24) as ex:
+              futs=[ex.submit(probe,j) for j in jobs]
+              for f in as_completed(futs):
+                  r,s,st,n=f.result()
+                  if st==200: hits[r].append({'symbol':s,'bytes':n})
+          for r in routes:
+              hits[r]=sorted(hits[r],key=lambda x:(0 if x['symbol'].endswith('m') else 1 if 'Raw_Spread' in x['symbol'] else 2,x['symbol']))
+          print('EXNESS_ROUTE_MAP='+json.dumps(hits,sort_keys=True))
+          print('EXNESS_COVERAGE='+str(sum(bool(v) for v in hits.values()))+'/29')
           PY
