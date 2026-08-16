@@ -1,4 +1,4 @@
-name: Trailaris Deriv Resolution
+name: Trailaris Deriv Backward Pagination
 on:
   push:
     branches: [trailaris-scratch]
@@ -10,37 +10,24 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Resolve symbols and exact historical availability
+      - name: Probe direct synthetic history by end plus count
         shell: bash
         run: |
           python -m pip install --quiet websocket-client
           python - <<'PY'
           import websocket,json,datetime
           url='wss://ws.binaryws.com/websockets/v3?app_id=1089'
+          syms=['R_75','R_50','R_100','R_25','R_10']
+          ends=['2024-02-01T00:00:00','2025-06-01T00:00:00','2026-07-01T00:00:00']
+          def ep(s):return int(datetime.datetime.fromisoformat(s).replace(tzinfo=datetime.timezone.utc).timestamp())
           def call(req):
             ws=websocket.create_connection(url,timeout=30);ws.send(json.dumps(req));m=json.loads(ws.recv());ws.close();return m
-          m=call({'active_symbols':'full'})
-          active=m.get('active_symbols',[])
-          picked=[]
-          for x in active:
-            name=' '.join(str(x.get(k,'')) for k in ['display_name','symbol','underlying_symbol','market_display_name','submarket_display_name'])
-            if 'Volatility' in name or (x.get('symbol') or '').startswith('R_'):
-              picked.append({k:x.get(k) for k in ['symbol','underlying_symbol','display_name','market','market_display_name','submarket','submarket_display_name','pip']})
-          print('DERIV_VOLATILITY_SYMBOLS='+json.dumps(picked,sort_keys=True))
-          candidates=[]
-          for x in picked:
-            nm=str(x.get('display_name',''))
-            if any(f'Volatility {n} Index' in nm for n in [10,25,50,75,100]): candidates.append(x.get('symbol') or x.get('underlying_symbol'))
-          candidates=[x for x in candidates if x]
-          print('DERIV_TARGET_SYMBOLS='+json.dumps(candidates))
-          tests=[('2025-05-01T00:00:00','2025-05-01T03:00:00'),('2024-01-02T00:00:00','2024-01-02T03:00:00'),('2026-07-01T00:00:00','2026-07-01T03:00:00')]
-          def ep(s):return int(datetime.datetime.fromisoformat(s).replace(tzinfo=datetime.timezone.utc).timestamp())
           out={}
-          for s in candidates:
+          for s in syms:
             out[s]=[]
-            for a,b in tests:
-              req={'ticks_history':s,'start':ep(a),'end':str(ep(b)),'style':'candles','granularity':60}
+            for e in ends:
+              req={'ticks_history':s,'end':str(ep(e)),'count':5000,'style':'candles','granularity':60,'adjust_start_time':1}
               m=call(req);cs=m.get('candles',[])
-              out[s].append({'requested':[a,b],'n':len(cs),'first':cs[0].get('epoch') if cs else None,'last':cs[-1].get('epoch') if cs else None,'error':m.get('error'),'echo':m.get('echo_req')})
-          print('DERIV_HISTORY='+json.dumps(out,sort_keys=True))
+              out[s].append({'end':e,'n':len(cs),'first':cs[0].get('epoch') if cs else None,'last':cs[-1].get('epoch') if cs else None,'error':m.get('error'),'echo':m.get('echo_req')})
+          print('DERIV_BACKWARD='+json.dumps(out,sort_keys=True))
           PY
